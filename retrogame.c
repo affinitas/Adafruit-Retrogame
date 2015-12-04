@@ -136,6 +136,24 @@ struct {
 	// For credit/start/etc., use USB keyboard or add more buttons.
 	{  -1,     -1           } }; // END OF LIST, DO NOT CHANGE
 
+// A "Vulcan nerve pinch" (holding down a specific button combination
+// for a few seconds) issues an 'esc' keypress to MAME (which brings up
+// an exit menu or quits the current game).  The button combo is
+// configured with a bitmask corresponding to elements in the above io[]
+// array.  The default value here uses elements 6 and 7 (credit and start
+// in the Cupcade pinout).  If you change this, make certain it's a combo
+// that's not likely to occur during actual gameplay (i.e. avoid using
+// joystick directions or hold-for-rapid-fire buttons).
+// Also key auto-repeat times are set here.  This is for navigating the
+// game menu using the 'gamera' utility; MAME disregards key repeat
+// events (as it should).
+const unsigned long vulcanMask = (1L << 6) | (1L << 7);
+const int           vulcanKey  = KEY_ESC, // Keycode to send
+                    vulcanTime = 1500,    // Pinch time in milliseconds
+                    repTime1   = 500,     // Key hold time to begin repeat
+                    repTime2   = 100;     // Time between key repetitions
+
+
 // A few globals ---------------------------------------------------------
 
 char
@@ -273,7 +291,7 @@ int main(int argc, char *argv[]) {
 	                       intstate[32], // Last-read state
 	                       extstate[32], // Debounced state
 	                       lastKey = -1; // Last key down (for repeat)
-
+	unsigned long          bitMask, bit; // For Vulcan pinch detect
 	volatile unsigned char shortWait;    // Delay counter
 	struct input_event     keyEv, synEv; // uinput events
 	struct pollfd          p[32];        // GPIO file descriptors
@@ -394,7 +412,7 @@ int main(int argc, char *argv[]) {
 				err("Can't SET_KEYBIT");
 		}
 	}
-
+	if(ioctl(fd, UI_SET_KEYBIT, vulcanKey) < 0) err("Can't SET_KEYBIT");
 	struct uinput_user_dev uidev;
 	memset(&uidev, 0, sizeof(uidev));
 	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "retrogame");
@@ -450,6 +468,7 @@ int main(int argc, char *argv[]) {
 			// 'j' (number of non-GNDs) is re-counted as
 			// it's easier than maintaining an additional
 			// remapping table or a duplicate key[] list.
+			bitMask = 0L; // Mask of buttons currently pressed
 			bit     = 1L;
 			for(c=i=j=0; io[i].pin >= 0; i++, bit<<=1) {
 				if(io[i].key != GND) {
@@ -468,6 +487,7 @@ int main(int argc, char *argv[]) {
 							// and set initial
 							// repeat interval.
 							lastKey = i;
+							timeout = repTime1;
 						} else { // Release?
 							// Stop repeat and
 							// return to normal
@@ -477,12 +497,30 @@ int main(int argc, char *argv[]) {
 						}
 					}
 					j++;
+					if(intstate[i]) bitMask |= bit;
 				}
 			}
 
-
-		}  else if(lastKey >= 0) { // Else key repeat timeout
-			if(timeout > 30)   timeout -= 5; // Accelerate
+			// If the "Vulcan nerve pinch" buttons are pressed,
+			// set long timeout -- if this time elapses without
+			// a button state change, esc keypress will be sent.
+			if((bitMask & vulcanMask) == vulcanMask)
+				timeout = vulcanTime;
+		} else if(timeout == vulcanTime) { // Vulcan timeout occurred
+			// Send keycode (MAME exits or displays exit menu)
+			keyEv.code = vulcanKey;
+			for(i=1; i>= 0; i--) { // Press, release
+				keyEv.value = i;
+				write(fd, &keyEv, sizeof(keyEv));
+				usleep(10000); // Be slow, else MAME flakes
+				write(fd, &synEv, sizeof(synEv));
+				usleep(10000);
+			}
+			timeout = -1; // Return to normal processing
+			c       = 0;  // No add'l SYN required
+		} else if(lastKey >= 0) { // Else key repeat timeout
+			if(timeout == repTime1) timeout = repTime2;
+			else if(timeout > 30)   timeout -= 5; // Accelerate
 			c           = 1; // Follow w/SYN event
 			keyEv.code  = io[lastKey].key;
 			keyEv.value = 2; // Key repeat event
